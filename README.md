@@ -25,8 +25,7 @@ func StartServer() error {
 	app.SetLogPath("/home/logs/wwwroot/")
 	//set route
 	app.HttpServer.GET("/index", func(ctx dotweb.Context) error{
-		_, err := ctx.WriteString("welcome to my first web!")
-		return err
+		return ctx.WriteString("welcome to my first web!")
 	})
 	//begin server
 	err := app.StartServer(80)
@@ -114,8 +113,8 @@ import (
 
 func main() {
     dotapp := dotweb.New()
-    dotapp.HttpServer.GET("/hello", func(ctx *dotweb.HttpContext) {
-        ctx.WriteString("hello world!")
+    dotapp.HttpServer.GET("/hello", func(ctx dotweb.Context) error{
+        return ctx.WriteString("hello world!")
     })
     dotapp.StartServer(80)
 }
@@ -134,14 +133,12 @@ import (
 func main() {
     dotapp := dotweb.New()
     dotapp.HttpServer.GET("/hello/:name", func(ctx dotweb.Context) error{
-        _, err := ctx.WriteString("hello " + ctx.GetRouterName("name"))
-        return err
+        return ctx.WriteString("hello " + ctx.GetRouterName("name"))
     })
     dotapp.HttpServer.GET("/news/:category/:newsid", func(ctx dotweb.Context) error{
     	category := ctx.GetRouterName("category")
 	    newsid := ctx.GetRouterName("newsid")
-        _, err := ctx.WriteString("news info: category=" + category + " newsid=" + newsid)
-        return err
+        return ctx.WriteString("news info: category=" + category + " newsid=" + newsid)
     })
     dotapp.StartServer(80)
 }
@@ -169,12 +166,12 @@ type UserInfo struct {
 		Sex      int    `form:"sex"`
 }
 
-func(ctx *dotweb.HttpContext) TestBind{
+func TestBind(ctx dotweb.HttpContext) error{
         user := new(UserInfo)
         if err := ctx.Bind(user); err != nil {
-        	 ctx.WriteString("err => " + err.Error())
+        	 return ctx.WriteString("err => " + err.Error())
         }else{
-             ctx.WriteString("TestBind " + fmt.Sprint(user))
+             return ctx.WriteString("TestBind " + fmt.Sprint(user))
         }
 }
 
@@ -275,9 +272,16 @@ type NotFoundHandle  func(http.ResponseWriter, *http.Request)
 websocket - golang.org/x/net/websocket
 <br>
 redis - github.com/garyburd/redigo/redis
-
+<br>
+yaml - gopkg.in/yaml.v2
 
 ## 相关项目
+#### <a href="https://github.com/devfeel/longweb" target="_blank">LongWeb</a>
+项目简介：http长连接网关服务，提供Websocket及长轮询服务
+
+#### <a href="https://github.com/yulibaozi/yulibaozi.com" target="_blank">yulibaozi.com</a>
+项目简介：基于dotweb与mapper的一款go的博客程序
+
 #### <a href="https://github.com/devfeel/tokenserver" target="_blank">TokenServer</a>
 项目简介：token服务，提供token一致性服务以及相关的全局ID生成服务等
 

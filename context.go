@@ -13,12 +13,17 @@ import (
 	"github.com/devfeel/dotweb/session"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
 const (
 	defaultMemory   = 32 << 20 // 32 MB
 	defaultHttpCode = http.StatusOK
+	// ItemKeyHandleStartTime itemkey name for request handler start time
+	ItemKeyHandleStartTime = "dotweb.HttpContext.StartTime"
+	// ItemKeyHandleDuration itemkey name for request handler time duration
+	ItemKeyHandleDuration = "dotweb.HttpContext.HandleDuration"
 )
 
 const (
@@ -38,11 +43,11 @@ type (
 		RouterNode() RouterNode
 		RouterParams() Params
 		Handler() HttpHandle
-		AppContext() *core.ItemContext
+		AppItems() core.ConcurrenceMap
 		Cache() cache.Cache
-		Items() *core.ItemContext
-		AppSetConfig() *core.ItemContext
-		ViewData() *core.ItemContext
+		Items() core.ConcurrenceMap
+		ConfigSet() core.ReadonlyMap
+		ViewData() core.ConcurrenceMap
 		SessionID() string
 		Session() (state *session.SessionState)
 		Hijack() (*HijackConn, error)
@@ -52,12 +57,15 @@ type (
 		IsEnd() bool
 		Redirect(code int, targetUrl string) error
 		QueryString(key string) string
+		QueryInt(key string) int
+		QueryInt64(key string) int64
 		FormValue(key string) string
 		PostFormValue(key string) string
 		File(file string) (err error)
 		Attachment(file string, name string) error
 		Inline(file string, name string) error
 		Bind(i interface{}) error
+		BindJsonBody(i interface{}) error
 		GetRouterName(key string) string
 		RemoteIP() string
 		SetCookieValue(name, value string, maxAge int)
@@ -69,41 +77,41 @@ type (
 		View(name string) error
 		ViewC(code int, name string) error
 		Write(code int, content []byte) (int, error)
-		WriteString(contents ...interface{}) (int, error)
-		WriteStringC(code int, contents ...interface{}) (int, error)
-		WriteHtml(contents ...interface{}) (int, error)
-		WriteHtmlC(code int, contents ...interface{}) (int, error)
-		WriteBlob(contentType string, b []byte) (int, error)
-		WriteBlobC(code int, contentType string, b []byte) (int, error)
-		WriteJson(i interface{}) (int, error)
-		WriteJsonC(code int, i interface{}) (int, error)
-		WriteJsonBlob(b []byte) (int, error)
-		WriteJsonBlobC(code int, b []byte) (int, error)
-		WriteJsonp(callback string, i interface{}) (int, error)
-		WriteJsonpBlob(callback string, b []byte) (size int, err error)
+		WriteString(contents ...interface{}) error
+		WriteStringC(code int, contents ...interface{}) error
+		WriteHtml(contents ...interface{}) error
+		WriteHtmlC(code int, contents ...interface{}) error
+		WriteBlob(contentType string, b []byte) error
+		WriteBlobC(code int, contentType string, b []byte) error
+		WriteJson(i interface{}) error
+		WriteJsonC(code int, i interface{}) error
+		WriteJsonBlob(b []byte) error
+		WriteJsonBlobC(code int, b []byte) error
+		WriteJsonp(callback string, i interface{}) error
+		WriteJsonpBlob(callback string, b []byte) error
 	}
 
 	HttpContext struct {
 		context context.Context
 		//暂未启用
-		cancle       context.CancelFunc
-		request      *Request
-		routerNode   RouterNode
-		routerParams Params
-		response     *Response
-		webSocket    *WebSocket
-		hijackConn   *HijackConn
-		isWebSocket  bool
-		isHijack     bool
-		isEnd        bool //表示当前处理流程是否需要终止
-		httpServer   *HttpServer
-		sessionID    string
-		innerItems   *core.ItemContext
-		items        *core.ItemContext
-		viewData     *core.ItemContext
-		features     *xFeatureTools
-		handler      HttpHandle
-		startTime    time.Time
+		cancle         context.CancelFunc
+		middlewareStep string
+		request        *Request
+		routerNode     RouterNode
+		routerParams   Params
+		response       *Response
+		webSocket      *WebSocket
+		hijackConn     *HijackConn
+		isWebSocket    bool
+		isHijack       bool
+		isEnd          bool //表示当前处理流程是否需要终止
+		httpServer     *HttpServer
+		sessionID      string
+		innerItems     core.ConcurrenceMap
+		items          core.ConcurrenceMap
+		viewData       core.ConcurrenceMap
+		features       *xFeatureTools
+		handler        HttpHandle
 	}
 )
 
@@ -121,13 +129,14 @@ func (ctx *HttpContext) reset(res *Response, r *Request, server *HttpServer, nod
 	ctx.isEnd = false
 	ctx.features = FeatureTools
 	ctx.handler = handler
-	ctx.startTime = time.Now()
+	ctx.Items().Set(ItemKeyHandleStartTime, time.Now())
 }
 
 //release all field
 func (ctx *HttpContext) release() {
 	ctx.request = nil
 	ctx.response = nil
+	ctx.middlewareStep = ""
 	ctx.routerNode = nil
 	ctx.routerParams = nil
 	ctx.webSocket = nil
@@ -142,7 +151,8 @@ func (ctx *HttpContext) release() {
 	ctx.viewData = nil
 	ctx.sessionID = ""
 	ctx.handler = nil
-	ctx.startTime = time.Time{}
+	ctx.Items().Remove(ItemKeyHandleStartTime)
+	ctx.Items().Remove(ItemKeyHandleDuration)
 }
 
 // Context return context.Context
@@ -219,11 +229,11 @@ func (ctx *HttpContext) Features() *xFeatureTools {
 
 // AppContext get application's global appcontext
 // issue #3
-func (ctx *HttpContext) AppContext() *core.ItemContext {
+func (ctx *HttpContext) AppItems() core.ConcurrenceMap {
 	if ctx.HttpServer != nil {
-		return ctx.httpServer.DotApp.AppContext
+		return ctx.httpServer.DotApp.Items
 	} else {
-		return core.NewItemContext()
+		return core.NewConcurrenceMap()
 	}
 }
 
@@ -234,33 +244,33 @@ func (ctx *HttpContext) Cache() cache.Cache {
 
 // getInnerItems get request's inner item context
 // lazy init when first use
-func (ctx *HttpContext) getInnerItems() *core.ItemContext {
+func (ctx *HttpContext) getInnerItems() core.ConcurrenceMap {
 	if ctx.innerItems == nil {
-		ctx.innerItems = core.NewItemContext()
+		ctx.innerItems = core.NewConcurrenceMap()
 	}
 	return ctx.innerItems
 }
 
 // Items get request's item context
 // lazy init when first use
-func (ctx *HttpContext) Items() *core.ItemContext {
+func (ctx *HttpContext) Items() core.ConcurrenceMap {
 	if ctx.items == nil {
-		ctx.items = core.NewItemContext()
+		ctx.items = core.NewConcurrenceMap()
 	}
 	return ctx.items
 }
 
 // AppSetConfig get appset from config file
 // update for issue #16 配置文件
-func (ctx *HttpContext) AppSetConfig() *core.ItemContext {
-	return ctx.HttpServer().DotApp.Config.AppSetConfig
+func (ctx *HttpContext) ConfigSet() core.ReadonlyMap {
+	return ctx.HttpServer().DotApp.Config.ConfigSet
 }
 
 // ViewData get view data context
 // lazy init when first use
-func (ctx *HttpContext) ViewData() *core.ItemContext {
+func (ctx *HttpContext) ViewData() core.ConcurrenceMap {
 	if ctx.viewData == nil {
-		ctx.viewData = core.NewItemContext()
+		ctx.viewData = core.NewConcurrenceMap()
 	}
 	return ctx.viewData
 }
@@ -315,6 +325,34 @@ func (ctx *HttpContext) Redirect(code int, targetUrl string) error {
  */
 func (ctx *HttpContext) QueryString(key string) string {
 	return ctx.request.QueryString(key)
+}
+
+// QueryInt get query key with int format
+// if not exists or not int type, return 0
+func (ctx *HttpContext) QueryInt(key string) int {
+	param := ctx.request.QueryString(key)
+	if param == "" {
+		return 0
+	}
+	val, err := strconv.Atoi(param)
+	if err != nil {
+		return 0
+	}
+	return val
+}
+
+// QueryInt64 get query key with int64 format
+// if not exists or not int64 type, return 0
+func (ctx *HttpContext) QueryInt64(key string) int64 {
+	param := ctx.request.QueryString(key)
+	if param == "" {
+		return 0
+	}
+	val, err := strconv.ParseInt(param, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return val
 }
 
 /*
@@ -379,13 +417,17 @@ func (ctx *HttpContext) contentDisposition(file, name, dispositionType string) (
 	return
 }
 
-/*
-* 支持Json、Xml、Form提交的属性绑定
- */
+// Bind decode req.Body or form-value to struct
 func (ctx *HttpContext) Bind(i interface{}) error {
 	return ctx.httpServer.Binder().Bind(i, ctx)
 }
 
+// BindJsonBody default use json decode req.Body to struct
+func (ctx *HttpContext) BindJsonBody(i interface{}) error {
+	return ctx.httpServer.Binder().BindJsonBody(i, ctx)
+}
+
+// GetRouterName get router name
 func (ctx *HttpContext) GetRouterName(key string) string {
 	return ctx.routerParams.ByName(key)
 }
@@ -477,94 +519,97 @@ func (ctx *HttpContext) Write(code int, content []byte) (int, error) {
 }
 
 // WriteString write (200, string, text/plain) to response
-func (ctx *HttpContext) WriteString(contents ...interface{}) (int, error) {
+func (ctx *HttpContext) WriteString(contents ...interface{}) error {
 	return ctx.WriteStringC(defaultHttpCode, contents...)
 }
 
 // WriteStringC write (httpCode, string, text/plain) to response
-func (ctx *HttpContext) WriteStringC(code int, contents ...interface{}) (int, error) {
+func (ctx *HttpContext) WriteStringC(code int, contents ...interface{}) error {
 	content := fmt.Sprint(contents...)
 	return ctx.WriteBlobC(code, MIMETextPlainCharsetUTF8, []byte(content))
 }
 
 // WriteString write (200, string, text/html) to response
-func (ctx *HttpContext) WriteHtml(contents ...interface{}) (int, error) {
+func (ctx *HttpContext) WriteHtml(contents ...interface{}) error {
 	return ctx.WriteHtmlC(defaultHttpCode, contents...)
 }
 
 // WriteHtmlC write (httpCode, string, text/html) to response
-func (ctx *HttpContext) WriteHtmlC(code int, contents ...interface{}) (int, error) {
+func (ctx *HttpContext) WriteHtmlC(code int, contents ...interface{}) error {
 	content := fmt.Sprint(contents...)
 	return ctx.WriteBlobC(code, MIMETextHTMLCharsetUTF8, []byte(content))
 }
 
 // WriteBlob write []byte content to response
-func (ctx *HttpContext) WriteBlob(contentType string, b []byte) (int, error) {
+func (ctx *HttpContext) WriteBlob(contentType string, b []byte) error {
 	return ctx.WriteBlobC(defaultHttpCode, contentType, b)
 }
 
 // WriteBlobC write (httpCode, []byte) to response
-func (ctx *HttpContext) WriteBlobC(code int, contentType string, b []byte) (int, error) {
+func (ctx *HttpContext) WriteBlobC(code int, contentType string, b []byte) error {
 	if contentType != "" {
 		ctx.response.SetContentType(contentType)
 	}
 	if ctx.IsHijack() {
-		return ctx.hijackConn.WriteBlob(b)
+		_, err := ctx.hijackConn.WriteBlob(b)
+		return err
 	} else {
-		return ctx.response.Write(code, b)
+		_, err := ctx.response.Write(code, b)
+		return err
 	}
 }
 
 // WriteJson write (httpCode, json string) to response
 // auto convert interface{} to json string
-func (ctx *HttpContext) WriteJson(i interface{}) (int, error) {
+func (ctx *HttpContext) WriteJson(i interface{}) error {
 	return ctx.WriteJsonC(defaultHttpCode, i)
 }
 
 // WriteJsonC write (httpCode, json string) to response
 // auto convert interface{} to json string
-func (ctx *HttpContext) WriteJsonC(code int, i interface{}) (int, error) {
+func (ctx *HttpContext) WriteJsonC(code int, i interface{}) error {
 	b, err := json.Marshal(i)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	return ctx.WriteJsonBlobC(code, b)
 }
 
 // WriteJsonBlob write json []byte to response
-func (ctx *HttpContext) WriteJsonBlob(b []byte) (int, error) {
+func (ctx *HttpContext) WriteJsonBlob(b []byte) error {
 	return ctx.WriteJsonBlobC(defaultHttpCode, b)
 }
 
 // WriteJsonBlobC write (httpCode, json []byte) to response
-func (ctx *HttpContext) WriteJsonBlobC(code int, b []byte) (int, error) {
+func (ctx *HttpContext) WriteJsonBlobC(code int, b []byte) error {
 	return ctx.WriteBlobC(code, MIMEApplicationJSONCharsetUTF8, b)
 }
 
 // WriteJsonp write jsonp string to response
-func (ctx *HttpContext) WriteJsonp(callback string, i interface{}) (int, error) {
+func (ctx *HttpContext) WriteJsonp(callback string, i interface{}) error {
 	b, err := json.Marshal(i)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	return ctx.WriteJsonpBlob(callback, b)
 }
 
 // WriteJsonpBlob write jsonp string as []byte to response
-func (ctx *HttpContext) WriteJsonpBlob(callback string, b []byte) (size int, err error) {
+func (ctx *HttpContext) WriteJsonpBlob(callback string, b []byte) error {
+	var err error
 	ctx.response.SetContentType(MIMEApplicationJavaScriptCharsetUTF8)
 	//特殊处理，如果为hijack，需要先行WriteBlob头部
 	if ctx.IsHijack() {
-		if size, err = ctx.hijackConn.WriteBlob([]byte(ctx.hijackConn.header + "\r\n")); err != nil {
-			return
+		if _, err = ctx.hijackConn.WriteBlob([]byte(ctx.hijackConn.header + "\r\n")); err != nil {
+			return err
 		}
 	}
-	if size, err = ctx.WriteBlob("", []byte(callback+"(")); err != nil {
-		return
+	if err = ctx.WriteBlob("", []byte(callback+"(")); err != nil {
+		return err
 	}
-	if size, err = ctx.WriteBlob("", b); err != nil {
-		return
+	if err = ctx.WriteBlob("", b); err != nil {
+		return err
 	}
-	size, err = ctx.WriteBlob("", []byte(");"))
-	return
+	err = ctx.WriteBlob("", []byte(");"))
+	return err
 }

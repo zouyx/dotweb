@@ -48,8 +48,7 @@ func TestBind(ctx dotweb.Context) error {
 
 	}
 
-	_, err := ctx.WriteString("TestBind [" + errstr + "] " + fmt.Sprint(user))
-	return err
+	return ctx.WriteString("TestBind [" + errstr + "] " + fmt.Sprint(user))
 }
 
 func GetBind(ctx dotweb.Context) error {
@@ -69,11 +68,27 @@ func GetBind(ctx dotweb.Context) error {
 
 	}
 
-	_, err := ctx.WriteString("GetBind [" + errstr + "] " + fmt.Sprint(user))
-	return err
+	return ctx.WriteString("GetBind [" + errstr + "] " + fmt.Sprint(user))
+}
+
+func PostJsonBind(ctx dotweb.Context) error{
+	type UserInfo struct {
+		UserName string `json:"user"`
+		Sex      int    `json:"sex"`
+	}
+	user := new(UserInfo)
+	errstr := "no error"
+	if err := ctx.BindJsonBody(user); err != nil {
+		errstr = err.Error()
+	} else {
+
+	}
+
+	return ctx.WriteString("PostBind [" + errstr + "] " + fmt.Sprint(user))
 }
 
 func InitRoute(server *dotweb.HttpServer) {
 	server.Router().POST("/", TestBind)
 	server.Router().GET("/getbind", GetBind)
+	server.Router().POST("/jsonbind", PostJsonBind)
 }

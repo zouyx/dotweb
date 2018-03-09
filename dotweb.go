@@ -19,7 +19,9 @@ import (
 	"github.com/devfeel/dotweb/logger"
 	"github.com/devfeel/dotweb/servers"
 	"github.com/devfeel/dotweb/session"
+	"reflect"
 	"sync"
+	"time"
 )
 
 type (
@@ -32,9 +34,10 @@ type (
 		ExceptionHandler        ExceptionHandle
 		NotFoundHandler         StandardHandle // NotFoundHandler 支持自定义404处理代码能力
 		MethodNotAllowedHandler StandardHandle // MethodNotAllowedHandler fixed for #64 增加MethodNotAllowed自定义处理
-		AppContext              *core.ItemContext
+		Items                   core.ConcurrenceMap
 		middlewareMap           map[string]MiddlewareFunc
 		middlewareMutex         *sync.RWMutex
+		StartMode               string
 	}
 
 	// ExceptionHandle 支持自定义异常处理代码能力
@@ -49,11 +52,19 @@ type (
 )
 
 const (
-	DefaultHTTPPort     = 8080 //DefaultHTTPPort default http port; fixed for #70 UPDATE default http port 80 to 8080
-	RunMode_Development = "development"
-	RunMode_Production  = "production"
-)
+	// DefaultHTTPPort default http port; fixed for #70 UPDATE default http port 80 to 8080
+	DefaultHTTPPort           = 8080
 
+	// RunMode_Development app runmode in development mode
+	RunMode_Development       = "development"
+	// RunMode_Production app runmode in production mode
+	RunMode_Production        = "production"
+
+	//StartMode_New app startmode in New mode
+	StartMode_New     = "New"
+	//StartMode_Classic app startmode in Classic mode
+	StartMode_Classic = "Classic"
+)
 
 //New create and return DotApp instance
 func New() *DotWeb {
@@ -61,12 +72,16 @@ func New() *DotWeb {
 		HttpServer:      NewHttpServer(),
 		OfflineServer:   servers.NewOfflineServer(),
 		Middlewares:     make([]Middleware, 0),
-		AppContext:      core.NewItemContext(),
+		Items:           core.NewConcurrenceMap(),
 		Config:          config.NewConfig(),
 		middlewareMap:   make(map[string]MiddlewareFunc),
 		middlewareMutex: new(sync.RWMutex),
+		StartMode:       StartMode_New,
 	}
 	app.HttpServer.setDotApp(app)
+	//add default httphandler with middlewares
+	//fixed for issue #100
+	app.Use(&xMiddleware{})
 
 	//init logger
 	logger.InitLog()
@@ -79,6 +94,7 @@ func New() *DotWeb {
 // 3.print logo
 func Classic() *DotWeb {
 	app := New()
+	app.StartMode = StartMode_Classic
 
 	app.SetEnabledLog(true)
 	app.UseRequestLog()
@@ -141,6 +157,19 @@ func (app *DotWeb) SetProductionMode() {
 	logger.SetEnabledConsole(false)
 }
 
+// ExcludeUse registers a middleware exclude routers
+// like exclude /index or /query/:id
+func (app *DotWeb) ExcludeUse(m Middleware, routers ...string) {
+	middlewareLen := len(app.Middlewares)
+	if m != nil {
+		m.Exclude(routers...)
+		if middlewareLen > 0 {
+			app.Middlewares[middlewareLen-1].SetNext(m)
+		}
+		app.Middlewares = append(app.Middlewares, m)
+	}
+}
+
 // Use registers a middleware
 func (app *DotWeb) Use(m ...Middleware) {
 	step := len(app.Middlewares) - 1
@@ -155,9 +184,17 @@ func (app *DotWeb) Use(m ...Middleware) {
 	}
 }
 
-// UseRequestLog register RequestLog middleware
+// UseRequestLog register RequestLogMiddleware
 func (app *DotWeb) UseRequestLog() {
 	app.Use(&RequestLogMiddleware{})
+}
+
+// UseTimeoutHook register TimeoutHookMiddleware
+func (app *DotWeb) UseTimeoutHook(handler StandardHandle, timeout time.Duration){
+	app.Use(&TimeoutHookMiddleware{
+		HookHandle: handler,
+		TimeoutDuration:timeout,
+	})
 }
 
 // SetExceptionHandle set custom error handler
@@ -244,11 +281,17 @@ func (app *DotWeb) MustStart() {
 // not support pprof server auto start
 func (app *DotWeb) ListenAndServe(addr string) error {
 	app.initAppConfig()
-	app.initRegisterMiddleware()
-	app.initRegisterRoute()
-	app.initRegisterGroup()
+	app.initRegisterConfigMiddleware()
+	app.initRegisterConfigRoute()
+	app.initRegisterConfigGroup()
+
 	app.initServerEnvironment()
-	app.initInnerRouter()
+
+	app.initBindMiddleware()
+
+	if app.StartMode == StartMode_Classic {
+		app.IncludeDotwebGroup()
+	}
 
 	if app.HttpServer.ServerConfig().EnabledTLS {
 		err := app.HttpServer.ListenAndServeTLS(addr, app.HttpServer.ServerConfig().TLSCertFile, app.HttpServer.ServerConfig().TLSKeyFile)
@@ -300,8 +343,8 @@ func (app *DotWeb) initAppConfig() {
 	}
 }
 
-// init register Middleware
-func (app *DotWeb) initRegisterMiddleware() {
+// init register config's Middleware
+func (app *DotWeb) initRegisterConfigMiddleware() {
 	config := app.Config
 	//register app's middleware
 	for _, m := range config.Middlewares {
@@ -314,8 +357,8 @@ func (app *DotWeb) initRegisterMiddleware() {
 	}
 }
 
-// init register route
-func (app *DotWeb) initRegisterRoute() {
+// init register config's route
+func (app *DotWeb) initRegisterConfigRoute() {
 	config := app.Config
 	//load router and register
 	for _, r := range config.Routers {
@@ -335,8 +378,8 @@ func (app *DotWeb) initRegisterRoute() {
 	}
 }
 
-// init register route
-func (app *DotWeb) initRegisterGroup() {
+// init register config's route
+func (app *DotWeb) initRegisterConfigGroup() {
 	config := app.Config
 	//support group
 	for _, v := range config.Groups {
@@ -371,8 +414,70 @@ func (app *DotWeb) initRegisterGroup() {
 	}
 }
 
-// init inner routers
-func (app *DotWeb) initInnerRouter() {
+// init bind app's middleware to router node
+func (app *DotWeb) initBindMiddleware() {
+	router := app.HttpServer.Router().(*router)
+	//bind app middlewares
+	for fullExpress, _ := range router.allRouterExpress {
+		expresses := strings.Split(fullExpress, "_")
+		if len(expresses) < 2 {
+			continue
+		}
+		node := router.getNode(expresses[0], expresses[1])
+		if node == nil {
+			continue
+		}
+
+		node.appMiddlewares = app.Middlewares
+		for _, m := range node.appMiddlewares {
+			if m.HasExclude() && m.ExistsExcludeRouter(node.fullPath) {
+				logger.Logger().Debug("DotWeb initBindMiddleware [app] "+fullExpress+" "+reflect.TypeOf(m).String()+" exclude", LogTarget_HttpServer)
+				node.hasExcludeMiddleware = true
+			} else {
+				logger.Logger().Debug("DotWeb initBindMiddleware [app] "+fullExpress+" "+reflect.TypeOf(m).String()+" match", LogTarget_HttpServer)
+			}
+		}
+		if len(node.middlewares) > 0 {
+			firstMiddleware := &xMiddleware{}
+			firstMiddleware.SetNext(node.middlewares[0])
+			node.middlewares = append([]Middleware{firstMiddleware}, node.middlewares...)
+		}
+	}
+
+	//bind group middlewares
+	for _, g := range app.HttpServer.groups {
+		xg := g.(*xGroup)
+		if len(xg.middlewares) <= 0 {
+			continue
+		} else {
+			firstMiddleware := &xMiddleware{}
+			firstMiddleware.SetNext(xg.middlewares[0])
+			xg.middlewares = append([]Middleware{firstMiddleware}, xg.middlewares...)
+		}
+		for fullExpress, _ := range xg.allRouterExpress {
+			expresses := strings.Split(fullExpress, "_")
+			if len(expresses) < 2 {
+				continue
+			}
+			node := router.getNode(expresses[0], expresses[1])
+			if node == nil {
+				continue
+			}
+			node.groupMiddlewares = xg.middlewares
+			for _, m := range node.groupMiddlewares {
+				if m.HasExclude() && m.ExistsExcludeRouter(node.fullPath) {
+					logger.Logger().Debug("DotWeb initBindMiddleware [group] "+fullExpress+" "+reflect.TypeOf(m).String()+" exclude", LogTarget_HttpServer)
+					node.hasExcludeMiddleware = true
+				} else {
+					logger.Logger().Debug("DotWeb initBindMiddleware [group] "+fullExpress+" "+reflect.TypeOf(m).String()+" match", LogTarget_HttpServer)
+				}
+			}
+		}
+	}
+}
+
+// IncludeDotwebGroup init inner routers
+func (app *DotWeb) IncludeDotwebGroup() {
 	//默认支持pprof信息查看
 	gInner := app.HttpServer.Group("/dotweb")
 	gInner.GET("/debug/pprof/:key", initPProf)
@@ -415,9 +520,6 @@ func (app *DotWeb) initServerEnvironment() {
 	if app.HttpServer.Renderer() == nil {
 		app.HttpServer.SetRenderer(NewInnerRenderer())
 	}
-
-	//add default httphandler with middlewares
-	app.Use(&xMiddleware{})
 
 	//start pprof server
 	if app.Config.App.EnabledPProf {
@@ -507,7 +609,7 @@ func showIntervalData(ctx Context) error {
 
 //显示服务器状态信息
 func showServerState(ctx Context) error {
-	ctx.WriteString(core.GlobalState.ShowHtmlData())
+	ctx.WriteHtml(core.GlobalState.ShowHtmlData())
 	return nil
 }
 

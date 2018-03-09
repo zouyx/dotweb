@@ -1,6 +1,8 @@
 package dotweb
 
-import "github.com/devfeel/dotweb/logger"
+import (
+	"github.com/devfeel/dotweb/logger"
+)
 
 type (
 	Group interface {
@@ -18,19 +20,33 @@ type (
 	xGroup struct {
 		prefix      string
 		middlewares []Middleware
+		allRouterExpress   map[string]struct{}
 		server      *HttpServer
 	}
 )
 
 func NewGroup(prefix string, server *HttpServer) Group {
-	g := &xGroup{prefix: prefix, server: server}
+	g := &xGroup{prefix: prefix, server: server, allRouterExpress:make(map[string]struct{})}
+	server.groups = append(server.groups, g)
 	logger.Logger().Debug("DotWeb:Group NewGroup ["+prefix+"]", LogTarget_HttpServer)
 	return g
 }
 
 // Use implements `Router#Use()` for sub-routes within the Group.
 func (g *xGroup) Use(m ...Middleware) Group {
-	g.middlewares = append(g.middlewares, m...)
+	if len(m) <= 0 {
+		return g
+	}
+	step := len(g.middlewares) - 1
+	for i := range m {
+		if m[i] != nil {
+			if step >= 0 {
+				g.middlewares[step].SetNext(m[i])
+			}
+			g.middlewares = append(g.middlewares, m[i])
+			step++
+		}
+	}
 	return g
 }
 
@@ -79,6 +95,8 @@ func (g *xGroup) RegisterRoute(method, path string, handler HttpHandle) RouterNo
 }
 
 func (g *xGroup) add(method, path string, handler HttpHandle) RouterNode {
-	node := g.server.Router().RegisterRoute(method, g.prefix+path, handler).Use(g.middlewares...)
+	node := g.server.Router().RegisterRoute(method, g.prefix+path, handler)
+	g.allRouterExpress[method+"_"+g.prefix+path] = struct{}{}
+	node.Node().groupMiddlewares = g.middlewares
 	return node
 }

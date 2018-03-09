@@ -1,11 +1,12 @@
 package dotweb
 
 import (
+	"bytes"
 	"errors"
-	files "github.com/devfeel/dotweb/framework/file"
 	"io"
 	"mime/multipart"
 	"os"
+	"path/filepath"
 )
 
 type UploadFile struct {
@@ -21,7 +22,7 @@ func NewUploadFile(file multipart.File, header *multipart.FileHeader) *UploadFil
 		File:     file,
 		Header:   header,
 		fileName: header.Filename,
-		fileExt:  files.GetFileExt(header.Filename),
+		fileExt:  filepath.Ext(header.Filename), //update for issue #99
 	}
 }
 
@@ -45,7 +46,9 @@ func (f *UploadFile) Size() int64 {
 	return f.fileSize
 }
 
-//save file in server-local with filename
+// SaveFile save file in server-local with filename
+// special:
+// if you SaveFile, it's will cause empty data when use ReadBytes
 func (f *UploadFile) SaveFile(fileName string) (size int64, err error) {
 	size = 0
 	if fileName == "" {
@@ -64,4 +67,13 @@ func (f *UploadFile) SaveFile(fileName string) (size int64, err error) {
 //get upload file extensions
 func (f *UploadFile) GetFileExt() string {
 	return f.fileExt
+}
+
+// Bytes returns a slice of byte hoding the UploadFile.File
+// special:
+// if you read bytes, it's will cause empty data in UploadFile.File, so you use SaveFile will no any data to save
+func (f *UploadFile) ReadBytes() []byte {
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(f.File)
+	return buf.Bytes()
 }
